@@ -83,12 +83,20 @@ def valid_row(q) -> bool:
 
 # ---------- states ----------
 def build_states(case: dict) -> list:
-    """Collapse consecutive identical (players_tracked, rates) reads into states, timed at their first read.
+    """Collapse identical (players_tracked, rates) reads into states, timed at their first read; a read that
+    repeats any earlier state (stale or reverted page) is dropped.
 
-    A null rate takes the last non-null rate of that trophy (0 if it never had one).
+    A null rate takes the last non-null rate of that trophy (its first non-null rate before it ever appears;
+    0 if it never has one).
     """
     n = len(case["trophies"])
     last = [None] * n
+    for rd in case["history"]:  # seed leading nulls with the trophy's first observed rate (v1 review)
+        rates = rd.get("rates") or []
+        for i in range(n):
+            v = rates[i] if i < len(rates) else None
+            if last[i] is None and isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+                last[i] = float(v)
     states, prev_key, seen = [], None, set()  # seen: a stale/reverted page read is not a new state
     for rd in case["history"]:
         rates = rd.get("rates") or []
