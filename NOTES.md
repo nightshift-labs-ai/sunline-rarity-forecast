@@ -228,3 +228,44 @@ A9_fast60_grinders 0.515/0.91, A10_frozen 1.465/0.15 (A1 not recorded). Per grou
 - Item 6: platinum/100 % floor tied to N instead of a fixed 0.04 %.
 - The principled version of step 1 (a chain-front bound in place of the constants 0.3 / x2).
 - Story rows in sim2 are still too narrow (cov90 0.64), and A5_stall_precut / A10_frozen are still the worst types.
+
+## v5 (s266, 2026-11-19; one Edit per change, then (a)+(b) via tools/checks.sh plus (c) s264 and (d) sim2; keep only if neither mean rises > 0.01)
+
+### Changes kept
+1. a4d8f95 platinum / 100 % rows: the fixed 0.04 % median floor is replaced by median >= logit(max(last rate, 100 x (tester earners + 5) / P(T))).
+   The upper tail is unchanged (s_hi >= 2.0 for grind/plat rows below 0.2 %). sim2 0.749 -> 0.745 (plat 0.336 -> 0.237), s264 0.284 -> 0.286.
+2. 1bec9ec saturation cap for rows at >= 40 % (only when players were added since the ref state): median <= logit((E_now + rho x (P(T) - N_now)) / P(T)),
+   rho = clamp(gain / dN_hist, 0, 1), the same marginal ratio as the M2 cap. Applied before the count floor. sim2 0.745 -> 0.726, s264 0.286 -> 0.284.
+   PLAT_FLOOR (the constant) is now unused; it is left in place.
+
+### Changes tried and reverted (diffs kept in /tmp/s266_step*.diff, not committed)
+- Item 1, secret trophies 37/38/48 as story beats. The data in sim2 (f00 cut vs truth, all 20 worlds) says yes: id 38 ends between chapters 3 and 4,
+  id 37 near chapter 4, and id 48 near the final. But at the cut only id 38 (and id 37 in A9) has >= 30 earners.
+  (a) Matching every secret G2/G3 row (mean |logit d| < 0.3 to a story item) and regrouping it as G1m: sim2 0.749 -> 0.760, s264 got worse too (W10 0.359 -> 0.427). Reverted.
+  (b) Narrower: no side strands ("final mission for", "hunt"), group unchanged, matched rows only join the chain closure (mean |d| < 0.5):
+      sim2 0.726 -> 0.717 (story 1.089 -> 1.056, A9 0.474 -> 0.460) but s264 0.284 -> 0.306. Reverted: the matches are spurious in s264's world.
+- Item 3, smult up to 1.3 when the calibration is pinned (raw damp 1.6 and fmult 2.0): sim2 0.745 -> 0.730 but s264 0.286 -> 0.306. Reverted
+  (the brief's stated risk: hindcast horizons are shorter than the target's).
+
+### Scores (MEAN loss / cov90)
+| sim | v4 | step 2 (plat floor) | step 4 (sat cap) = v5 |
+|---|---|---|---|
+| s264 world sim (11 types x 3 seeds) | 0.284 / 0.98 | 0.286 / 0.98 | 0.284 / 0.98 |
+| sim2 (10 types x 2 seeds) | 0.749 / 0.80 | 0.745 / 0.80 | 0.726 / 0.83 |
+
+s264 per world type, v4 -> v5 (loss/cov90): W1_base 0.252 -> 0.267/0.98, W2_fastN 0.254 -> 0.258/0.98, W3_slowN 0.236 -> 0.240/0.98,
+W4_fastP 0.234 -> 0.242/0.98, W5_slowP 0.283 -> 0.290/0.99, W6_stall 0.431 -> 0.450/0.93, W7_satur 0.268 -> 0.264/0.99,
+W8_fastN_slowP 0.285 -> 0.290/0.99, W9_slowN_fastP 0.230 -> 0.225/1.00, W10_lateWave 0.359 -> 0.339/0.93, W11_backfill 0.297 -> 0.262/1.00.
+s264 per group v5: G0 0.022, G1c 0.269, G1f 0.323, G1m 0.262, G2 0.255, G3 0.173, G4h 0.478, G4m 0.308, G4p 0.793/0.88 (v4 G4p 0.723/0.97, G4h 0.468).
+sim2 per world type, v4 -> v5 (loss/cov90): A1_mix_irreg (n/a) -> 0.552/0.93, A2_hourly_fastflat 0.632 -> 0.632/0.91, A3_weekend_surge 0.560 -> 0.564/0.89,
+A4_late_backfill 0.619 -> 0.600/0.88, A5_stall_precut 1.431 -> 1.416/0.70, A6_stall_pretgt 0.538 -> 0.507/0.94, A7_nearcut_slow80 0.580 -> 0.556/0.93,
+A8_casual_flood 0.571 -> 0.556/0.91, A9_fast60_grinders 0.515 -> 0.474/0.95, A10_frozen 1.465 -> 1.402/0.23.
+sim2 per group v5: gate 0.022, story 1.089/0.70, side 0.400/0.87, collect 0.723/0.90, grind 1.007/0.93, plat 0.237/0.82.
+(a) p00/p01 byte-identical and valid, 0 fallbacks; (b) s00 0.28 s, s01w 0.48 s, calibration_ran True, 0 fallbacks.
+
+### Not done in v5 / next
+- The s264 mean is flat (0.284). Several s264 types got slightly worse (W1 +0.015, W6 +0.019, W4/W5 ~+0.007), mostly from the plat floor (G4p 0.723 -> 0.793).
+  The saturation cap won back W10/W11. Check whether the (tester + 5) floor should use the low P(T) quantile.
+- Item 1 helps sim2 only. A safer match needs a stronger test than the level: e.g. the row's gain must track the matched item's gain over the last 24 h.
+- Item 3 (wider bands when pinned) helps sim2 only; the simulators still disagree about post-cut motion. Not revisited.
+- Not run this session: a multi-agent review (no time).
