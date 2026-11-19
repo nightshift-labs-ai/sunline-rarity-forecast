@@ -89,7 +89,7 @@ def build_states(case: dict) -> list:
     """
     n = len(case["trophies"])
     last = [None] * n
-    states, prev_key = [], None
+    states, prev_key, seen = [], None, set()  # seen: a stale/reverted page read is not a new state
     for rd in case["history"]:
         rates = rd.get("rates") or []
         for i in range(n):
@@ -103,7 +103,8 @@ def build_states(case: dict) -> list:
             continue
         filled = tuple(x if x is not None else 0.0 for x in last)
         key = (float(big_n), filled)
-        if key != prev_key:
+        if key != prev_key and key not in seen:
+            seen.add(key)
             states.append({"h": hours(rd.get("at") or rd["slot"]), "N": float(big_n), "r": list(filled)})
             prev_key = key
     return states
