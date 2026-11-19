@@ -198,3 +198,33 @@ the deadline. That is a generator assumption, not evidence.
 3. W6_stall is still the worst type (0.466). Check whether project_p over-projects N after a stall.
 4. When real post-refresh reads exist: re-check the no-refresh priors (g ~ 4, kappa ~ 0.3, period 0.5-6 h) against the observed refresh.
 5. Keep < 2 s worst case, byte-identical double runs, and tools/checks.sh green after every change.
+
+## v4 (s265, operator stress test with the independent agent-based sim2)
+
+### Changes (both inside the model; each one checked with (a) and (c)+(d) before its commit)
+1. `predict()`: upper-tail lift for rows that have not started (last rate < 0.5 %, not gate, not G4p or 100 % rows):
+   the median goes up 0.3 logit and the upper split-normal spread s_hi is doubled, so the q75/q95 offsets are x2. Method tag `+lift`.
+2. `forecast_case()`: hard grinds (G4h) below 2 % never take the `persist` guard. They get the union of our band and the house curve's
+   band (q05 = min, q95 = max, q25/q50/q75 = logit average). Method tag `+union`. Not applied on the no-refresh path.
+
+### Scores (MEAN: loss / cov90)
+| sim | v3 | after step 1 | after step 2 (v4) |
+|---|---|---|---|
+| s264 world sim (fc_s264, 11 types x 3 seeds) | 0.292 / 0.97 | 0.284 / 0.98 | 0.284 / 0.98 |
+| sim2 (fc_s265, 10 types x 2 seeds) | 0.923 / 0.66 | 0.774 / 0.80 | 0.749 / 0.80 |
+
+s264 per world type, v4 (loss/cov90/miss): W1_base 0.252/0.99, W2_fastN 0.254/0.99, W3_slowN 0.236/1.00, W4_fastP 0.234/1.00,
+W5_slowP 0.283/0.99, W6_stall 0.431/0.93, W7_satur 0.268/0.99, W8_fastN_slowP 0.285/0.99, W9_slowN_fastP 0.230/1.00,
+W10_lateWave 0.359/0.92, W11_backfill 0.297/0.97. Per group v4: G4h 0.468/1.00, G4p 0.723/0.97.
+sim2 per world type, v4: A2_hourly_fastflat 0.632/0.89, A3_weekend_surge 0.560/0.89, A4_late_backfill 0.619/0.87,
+A5_stall_precut 1.431/0.68, A6_stall_pretgt 0.538/0.92, A7_nearcut_slow80 0.580/0.91, A8_casual_flood 0.571/0.89,
+A9_fast60_grinders 0.515/0.91, A10_frozen 1.465/0.15 (A1 not recorded). Per group v4: story 1.141/0.64, grind 1.007/0.93, plat 0.336/0.82.
+(a) byte-identical and valid on p00/p01, 0 fallbacks; (b) s00 0.27 s, s01w 0.47 s, calibration_ran True, 0 fallbacks.
+
+### Not done in v4 (from the brief's v4 list)
+- Item 3: when the calibration is pinned at the grid edge (damp 1.3, fmult 1.5), allow smult > 1 or a wider skew.
+- Item 4: data-driven chain membership for secret trophies (rows 37/38/48 are sim2's worst).
+- Item 5: saturation-aware cap for rows at 40 % or more.
+- Item 6: platinum/100 % floor tied to N instead of a fixed 0.04 %.
+- The principled version of step 1 (a chain-front bound in place of the constants 0.3 / x2).
+- Story rows in sim2 are still too narrow (cov90 0.64), and A5_stall_precut / A10_frozen are still the worst types.
