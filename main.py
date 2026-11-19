@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import statistics
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -626,6 +627,64 @@ def calibrate(case: dict, ctx: dict, states: list, reads: list, h_now: float, h_
     return params, guard, cinfo
 
 
+# ---------- practice path: the page has not refreshed yet ----------
+NR_T = (0.5, 6.0)  # page refresh period range (h), log-uniform, uniform phase
+NR_G = (math.log(4.0), 0.8)  # ln(players growth) at the refresh, truncated at g >= 1
+NR_K = (math.log(0.3), 1.0)  # ln kappa: new players' earn fraction, relative to the share above the platinum floor
+
+
+def refresh_prob(a: float, d: float) -> float:
+    """P(first refresh in (A, A+D] | none in [0, A]), T log-uniform on NR_T: P(none in [0,A] | T) = (T-A)/T."""
+    if d <= 0:
+        return 0.0
+    lo, hi, m = math.log(NR_T[0]), math.log(NR_T[1]), 400
+    num = den = 0.0
+    for j in range(m):  # midpoints in ln T (log-uniform prior: equal weights)
+        t = math.exp(lo + (hi - lo) * (j + 0.5) / m)
+        if t > a:
+            den += (t - a) / t
+            num += (min(a + d, t) - a) / t
+    return num / den if den > 0 else 0.0
+
+
+def no_refresh_q(ctx: dict, states: list, reads: list, h_tgt: float):
+    """When every state has the same players_tracked N0 (launch night, no refresh seen), a deterministic mixture:
+    1-p on the current rate, p on a refresh to N1 = N0*g with E_i + f_i*(N1-N0) earners,
+    f_i = kappa*max(E_i - E_plat, 0)/N0. Returns (logit quantiles, p) or None (more than one N: the main model)."""
+    if len({s["N"] for s in states}) != 1 or not reads:
+        return None
+    hs = [h for h, _ in reads]
+    p = refresh_prob(max(hs) - min(hs), h_tgt - max(hs))
+    if p <= 0:
+        return None
+    n0, r = states[-1]["N"], states[-1]["r"]
+    e = [x * n0 / 100 for x in r]
+    rows = [i for i in range(len(r)) if i not in ctx["gate"]]
+    floor_ids = ctx["plat"] or rows
+    e_p = min(e[i] for i in floor_ids) if floor_ids else 0.0
+    nd = statistics.NormalDist()
+    p0 = nd.cdf(-NR_G[0] / NR_G[1])
+    gs = [math.exp(NR_G[0] + NR_G[1] * nd.inv_cdf(p0 + (1 - p0) * (j + 0.5) / 41)) for j in range(41)]
+    ks = [math.exp(NR_K[0] + NR_K[1] * nd.inv_cdf((k + 0.5) / 9)) for k in range(9)]
+    w = p / (len(gs) * len(ks))
+    out = [None] * len(r)
+    for i in rows:
+        atoms = [(r[i], 1 - p)]
+        for g in gs:
+            for kap in ks:
+                f = min(1.0, kap * max(e[i] - e_p, 0.0) / n0)
+                atoms.append((100 * (e[i] + f * n0 * (g - 1)) / (n0 * g), w))
+        atoms.sort()
+        q, cum, k = [], 0.0, 0
+        for tau in LEVELS:  # smallest atom with cumulative weight >= tau
+            while k < len(atoms) - 1 and cum + atoms[k][1] < tau - 1e-12:
+                cum += atoms[k][1]
+                k += 1
+            q.append(logit(atoms[k][0]))
+        out[i] = q
+    return out, round(p, 4)
+
+
 def finish(qlogit) -> list:
     """Logit quantiles -> a valid rounded row."""
     vals = [min(100.0, max(0.0, inv_logit(x))) for x in qlogit]
@@ -663,16 +722,21 @@ def forecast_case(case: dict, name: str) -> tuple:
         params = dict(PRIORS)
         reads = read_table(case)
         guard = {}
-        try:
-            cal = calibrate(case, ctx, states, reads, h_now, h_tgt)
-        except Exception as exc:  # visible: priors are used
-            cal = None
-            info["calibration_error"] = repr(exc)[:200]
-        if cal:
-            params, guard, info["calib"] = cal
-            info["calibration_ran"] = True
-            info["guard"] = guard
-        qs, methods = predict(case, ctx, states, h_now, h_tgt, params)
+        nr = no_refresh_q(ctx, states, reads, h_tgt)  # None unless every state has the same players_tracked
+        if nr is not None:
+            qs, info["p_refresh"] = nr
+            methods = ["gate" if q is None else "norefresh" for q in qs]
+        else:
+            try:
+                cal = calibrate(case, ctx, states, reads, h_now, h_tgt)
+            except Exception as exc:  # visible: priors are used
+                cal = None
+                info["calibration_error"] = repr(exc)[:200]
+            if cal:
+                params, guard, info["calib"] = cal
+                info["calibration_ran"] = True
+                info["guard"] = guard
+            qs, methods = predict(case, ctx, states, h_now, h_tgt, params)
         if any(v != "ours" for v in guard.values()):
             n = len(trophies)
             other = {"curve": house_curve_q(reads, n, h_now, h_tgt), "persist": persist_q(reads, n, h_now, h_tgt)}
