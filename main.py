@@ -380,24 +380,65 @@ def medians(case: dict, ctx: dict, states: list, h_now: float, h_tgt: float, par
     for i, v in zip(chain, pav_dec([med[i] for i in chain])):
         med[i] = v
     return {"med": med, "grp": grp, "ct": ct, "meth": meth, "sig_p": sig_p, "p_t": p_t, "span": span,
-            "last": [logit(r) for r in last["r"]]}
+            "last": [logit(r) for r in last["r"]], "c_now": c_now, "post": len(post)}
+
+
+def phi(z: float) -> float:
+    return 0.5 * (1 + math.erf(z / math.sqrt(2)))
+
+
+# Split-normal skew (s_lo, s_hi multipliers): late chain / grind fat upside, early chain and common rows fat downside.
+SKEW_UP = {"G1c", "G1f", "G1m", "G2", "G4m", "G4h", "G4p"}
 
 
 def predict(case: dict, ctx: dict, states: list, h_now: float, h_tgt: float, params: dict) -> tuple:
     """Logit quantiles (5 per trophy) at h_tgt from the states up to h_now, plus each row's method name."""
     mm = medians(case, ctx, states, h_now, h_tgt, params)
     horizon = max(h_tgt - h_now, 0.0)
+    diag = {"p_t": round(mm["p_t"], 1), "sig_p": round(mm["sig_p"], 3), "wide": 0, "sanity": 0}
     out, methods = [], []
     for i in range(len(case["trophies"])):
         if i in ctx["gate"]:
             out.append(None)
             methods.append("gate")
             continue
-        s_model = S_G.get(mm["grp"][i], 0.7) * math.sqrt(horizon / H_REF)
+        g, med, last = mm["grp"][i], mm["med"][i], mm["last"][i]
+        meth = mm["meth"][i]
+        s_model = S_G.get(g, 0.7) * math.sqrt(horizon / H_REF)
         s = math.sqrt(s_model ** 2 + mm["sig_p"] ** 2 + 1 / mm["ct"][i]) * params["smult"]
         s = max(s, 0.15)
-        out.append([mm["med"][i] + z * s for z in Z])
-        methods.append(mm["meth"][i])
+        # sanity: an absurd jump is pulled halfway back to the last rate and widened
+        up_rare = med > last and g[:2] in ("G1", "G2") and inv_logit(last) < 1.0
+        if abs(med - last) > 4 and not up_rare:
+            med, s = 0.5 * (med + last), s * 1.5
+            meth += "+sanity"
+            diag["sanity"] += 1
+        if s > 1.3:
+            diag["wide"] += 1
+        sk = params["skew"]
+        if g in SKEW_UP:
+            s_lo, s_hi = s * 0.85, s * 1.25 * sk
+        else:
+            s_lo, s_hi = s * 1.1 * sk, s * 0.9
+        if inv_logit(med) > 20:  # common rows: hedge a players-tracked wave
+            s_lo = max(s_lo, s * 1.2)
+        q = [med + z * (s_lo if z < 0 else s_hi) for z in Z]
+        # floor mass: put q05 (and q25) exactly at 0.01 when the floor is likely
+        p_floor = phi((LOGIT_LO - med) / s_lo)
+        if p_floor > 0.05:
+            q[0] = LOGIT_LO
+        if p_floor > 0.25:
+            q[1] = LOGIT_LO
+        # count floor per level (wins over floor mass): C(T) >= C(now), with P(T) at the matching quantile
+        if mm["post"] >= 2:
+            for lv, z in enumerate(Z):
+                p_lv = mm["p_t"] * math.exp(-z * mm["sig_p"])
+                q[lv] = max(q[lv], logit(100 * 0.98 * mm["c_now"][i] / p_lv))
+        for lv in range(1, 5):
+            q[lv] = max(q[lv], q[lv - 1])
+        out.append(q)
+        methods.append(meth)
+    ctx["diag"] = diag
     return out, methods
 
 
@@ -457,6 +498,7 @@ def forecast_case(case: dict, name: str) -> tuple:
         qs, methods = predict(case, ctx, states, h_now, h_tgt, params)
         qs = apply_constraints(ctx, qs)
         info["params"] = params
+        info["diag"] = ctx.get("diag", {})
     except Exception as exc:  # whole-model failure -> persistence for the case
         info["fallback_case"] = 1
         info["error"] = repr(exc)[:200]
