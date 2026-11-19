@@ -1,4 +1,4 @@
-"""sunline-rarity-forecast: GTA VI PS5 trophy earn-rate forecaster (Nightshift Labs, build v2).
+"""sunline-rarity-forecast: GTA VI PS5 trophy earn-rate forecaster (Nightshift Labs, build v3).
 
 For each case in $MAKEFUN_INPUT_DIR (else /input), it writes <id>.out to $MAKEFUN_OUTPUT_DIR (else /output):
 {"trophies":[{"id":n,"q":[q05,q25,q50,q75,q95]}]}, the rates in percent at the case's target.
@@ -6,6 +6,7 @@ For each case in $MAKEFUN_INPUT_DIR (else /input), it writes <id>.out to $MAKEFU
 Model, in short: collapse repeated reads into refresh STATES, then work in earner counts C_i = rate_i*N/100.
 Project players tracked P(T), keep the story chain ordered, and treat tester-era counts as floors.
 Quantiles come from a split normal on the logit scale. Stdlib only, deterministic (no clock, no random).
+If every read has the same players tracked (no page refresh seen yet), a refresh mixture is forecast instead.
 If anything fails, the program falls back to the house persistence row, for that trophy or for the whole case.
 """
 
