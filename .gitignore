@@ -1,0 +1,5 @@
+out/
+out2/
+synth/
+__pycache__/
+*.pyc
