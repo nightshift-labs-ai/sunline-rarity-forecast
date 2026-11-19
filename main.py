@@ -624,7 +624,13 @@ def forecast_case(case: dict, name: str) -> tuple:
     if case.get("levels") != LEVELS:
         raise ValueError(f"{name} asks for levels {case.get('levels')}")
     trophies = case["trophies"]
-    days = case["horizon_minutes"] / 1440
+    try:  # a missing horizon still gets the model (v1 review rules ?-3)
+        if "horizon_minutes" in case:
+            days = float(case["horizon_minutes"]) / 1440
+        else:
+            days = (hours(case["target"]) - hours(case["at"])) / 24
+    except Exception:
+        days = 6510 / 1440
     states = build_states(case)
     if not states:
         raise ValueError(f"{name} has no usable history")
