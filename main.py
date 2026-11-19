@@ -597,7 +597,9 @@ def calibrate(case: dict, ctx: dict, states: list, reads: list, h_now: float, h_
             if lo < best[0] - 1e-12:
                 best = (lo, best[1], best[2], sm, sk)
     params = dict(PRIORS, damp=round(0.5 * (best[1] + 1), 3), fmult=round(0.5 * (best[2] + 1), 3),
-                  smult=round(0.5 * (best[3] + 1), 3), skew=round(0.5 * (best[4] + 1), 3))
+                  smult=min(round(0.5 * (best[3] + 1), 3), 1.0), skew=round(0.5 * (best[4] + 1), 3))
+    # smult <= 1: hindcast origins see shorter, easier horizons than the target, so they only ever argued for
+    # wider bands, and the world sim showed v2 over-covered (0.96-0.99 at the 90% band); never force it up
     gl = {}
     for h0, h1, cut, rcut, ys in jobs:
         qs, _ = predict(case, ctx, cut, h0, h1, params)
