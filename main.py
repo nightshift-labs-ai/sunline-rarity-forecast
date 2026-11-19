@@ -391,9 +391,10 @@ def phi(z: float) -> float:
 SKEW_UP = {"G1c", "G1f", "G1m", "G2", "G4m", "G4h", "G4p"}
 
 
-def predict(case: dict, ctx: dict, states: list, h_now: float, h_tgt: float, params: dict) -> tuple:
+def predict(case: dict, ctx: dict, states: list, h_now: float, h_tgt: float, params: dict, mm=None) -> tuple:
     """Logit quantiles (5 per trophy) at h_tgt from the states up to h_now, plus each row's method name."""
-    mm = medians(case, ctx, states, h_now, h_tgt, params)
+    if mm is None:
+        mm = medians(case, ctx, states, h_now, h_tgt, params)
     horizon = max(h_tgt - h_now, 0.0)
     diag = {"p_t": round(mm["p_t"], 1), "sig_p": round(mm["sig_p"], 3), "wide": 0, "sanity": 0}
     out, methods = [], []
@@ -466,6 +467,134 @@ def apply_constraints(ctx: dict, qs: list) -> list:
     return qs
 
 
+# ---------- run-time self-calibration (hindcast on the case's own history) ----------
+LOGIT_HI = -LOGIT_LO
+GRID_DAMP = [0.6, 0.8, 1.0, 1.25, 1.5]  # multiplier on D_G (effective damping capped at 1.3)
+GRID_SMULT = [0.7, 0.85, 1.0, 1.2, 1.45]
+GRID_SKEW = [0.8, 1.0, 1.25]
+MAX_ORIGINS = 12
+
+
+def pin(y: float, q: list) -> float:
+    """Mean pinball loss of one row (logits), clamped as RULES Scoring does."""
+    tot = 0.0
+    for tau, qq in zip(LEVELS, q):
+        d = y - min(LOGIT_HI, max(LOGIT_LO, qq))
+        tot += 2 * max(tau * d, (tau - 1) * d)
+    return tot / 5
+
+
+def read_table(case: dict) -> list:
+    return [(hours(r.get("at") or r["slot"]), r.get("rates") or []) for r in case["history"]]
+
+
+def rate_at(rates: list, i: int):
+    v = rates[i] if i < len(rates) else None
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def persist_q(reads: list, n: int, h_at: float, h_tgt: float) -> list:
+    """House persistence in logits: last read's rate (null -> 0), RW spread."""
+    rw = SIGMA_RW * math.sqrt(max(h_tgt - h_at, 0) / 24)
+    last = reads[-1][1]
+    out = []
+    for i in range(n):
+        r = rate_at(last, i)
+        out.append([logit(r if r is not None else 0) + z * rw for z in Z])
+    return out
+
+
+def house_curve_q(reads: list, n: int, h_at: float, h_tgt: float) -> list:
+    """House curve in logits: per-trophy LS of logit vs ln(1+h) over the last 24 h of reads, read at the target."""
+    rw = SIGMA_RW * math.sqrt(max(h_tgt - h_at, 0) / 24)
+    win = [r for r in reads if r[0] >= h_at - 24]
+    base = persist_q(reads, n, h_at, h_tgt)
+    out = []
+    for i in range(n):
+        pts = [(lnx(h), logit(rate_at(rs, i))) for h, rs in win if rate_at(rs, i) is not None]
+        if len(pts) < 3:
+            out.append(base[i])
+            continue
+        b, res = ls_fit([p[0] for p in pts], [p[1] for p in pts])
+        mx = sum(p[0] for p in pts) / len(pts)
+        my = sum(p[1] for p in pts) / len(pts)
+        m = my + b * (lnx(h_tgt) - mx)
+        s = math.sqrt(rw ** 2 + res ** 2)
+        out.append([m + z * s for z in Z])
+    return out
+
+
+def calibrate(case: dict, ctx: dict, states: list, reads: list, h_now: float, h_tgt: float):
+    """Grid-search damping/spread/skew on hindcasts with the case's ln-time ratio, shrink 50% to the priors,
+    then pick per group: ours, or a 50/50 blend with the better house method. None if history is too short."""
+    n = len(case["trophies"])
+    start = fit_start(states)
+    if len(states) - start < 3 or h_now - states[start]["h"] < 24:
+        return None
+    ratio = (1 + h_tgt) / (1 + h_now)
+    h_lo, h_hi = states[start]["h"] + 3, (1 + states[-1]["h"]) / ratio - 1
+    if h_hi <= h_lo:
+        return None
+    jobs = []
+    for j in range(MAX_ORIGINS):
+        h0 = h_lo + (h_hi - h_lo) * j / (MAX_ORIGINS - 1)
+        cut = [s for s in states if s["h"] <= h0]
+        rcut = [r for r in reads if r[0] < h0]
+        if not rcut or len(cut) - fit_start(cut) < 2:
+            continue
+        h1 = ratio * (1 + h0) - 1
+        ans = [s for s in states if s["h"] <= h1][-1]
+        jobs.append((h0, h1, cut, rcut, [logit(r) for r in ans["r"]]))
+    if len(jobs) < 3:
+        return None
+
+    def loss_of(p, mms):
+        tot, cnt = 0.0, 0
+        for (h0, h1, cut, _, ys), mm in zip(jobs, mms):
+            qs, _ = predict(case, ctx, cut, h0, h1, p, mm)
+            qs = apply_constraints(ctx, qs)
+            for i in range(n):
+                if qs[i] is not None:
+                    tot += pin(ys[i], qs[i])
+                    cnt += 1
+        return tot / max(cnt, 1)
+
+    best, prior_loss = None, None
+    for d in GRID_DAMP:
+        mms = [medians(case, ctx, cut, h0, h1, dict(PRIORS, damp=d)) for h0, h1, cut, _, _ in jobs]
+        for sm in GRID_SMULT:
+            for sk in GRID_SKEW:
+                p = dict(PRIORS, damp=d, smult=sm, skew=sk)
+                lo = loss_of(p, mms)
+                if d == 1.0 and sm == 1.0 and sk == 1.0:
+                    prior_loss = lo
+                if best is None or lo < best[0] - 1e-12:
+                    best = (lo, d, sm, sk)
+    params = dict(PRIORS, damp=round(0.5 * (best[1] + 1), 3), smult=round(0.5 * (best[2] + 1), 3),
+                  skew=round(0.5 * (best[3] + 1), 3))
+    gl = {}
+    for h0, h1, cut, rcut, ys in jobs:
+        qs, _ = predict(case, ctx, cut, h0, h1, params)
+        qs = apply_constraints(ctx, qs)
+        hc, ps = house_curve_q(rcut, n, h0, h1), persist_q(rcut, n, h0, h1)
+        for i in range(n):
+            if qs[i] is None:
+                continue
+            a = gl.setdefault(ctx["groups"][i][0], [0.0, 0.0, 0.0, 0])
+            a[0] += pin(ys[i], qs[i])
+            a[1] += pin(ys[i], hc[i])
+            a[2] += pin(ys[i], ps[i])
+            a[3] += 1
+    guard, gloss = {}, {}
+    for g in sorted(gl):
+        o, c, p_, k = gl[g]
+        guard[g] = "ours" if o <= min(c, p_) else ("curve" if c <= p_ else "persist")
+        gloss[g] = [round(o / k, 4), round(c / k, 4), round(p_ / k, 4)]
+    cinfo = {"origins": len(jobs), "ratio": round(ratio, 3), "loss_prior": round(prior_loss or -1, 4),
+             "loss_best": round(best[0], 4), "group_loss_ours_curve_persist": gloss}
+    return params, guard, cinfo
+
+
 def finish(qlogit) -> list:
     """Logit quantiles -> a valid rounded row."""
     vals = [min(100.0, max(0.0, inv_logit(x))) for x in qlogit]
@@ -495,7 +624,26 @@ def forecast_case(case: dict, name: str) -> tuple:
         h_tgt = hours(case["target"])
         ctx = context(case, states)
         params = dict(PRIORS)
+        reads = read_table(case)
+        guard = {}
+        try:
+            cal = calibrate(case, ctx, states, reads, h_now, h_tgt)
+        except Exception as exc:  # visible: priors are used
+            cal = None
+            info["calibration_error"] = repr(exc)[:200]
+        if cal:
+            params, guard, info["calib"] = cal
+            info["calibration_ran"] = True
+            info["guard"] = guard
         qs, methods = predict(case, ctx, states, h_now, h_tgt, params)
+        if any(v != "ours" for v in guard.values()):
+            n = len(trophies)
+            other = {"curve": house_curve_q(reads, n, h_now, h_tgt), "persist": persist_q(reads, n, h_now, h_tgt)}
+            for i in range(n):
+                how = guard.get(ctx["groups"][i][0], "ours")
+                if qs[i] is not None and how != "ours":
+                    qs[i] = [0.5 * (a + b) for a, b in zip(qs[i], other[how][i])]
+                    methods[i] += "+" + how
         qs = apply_constraints(ctx, qs)
         info["params"] = params
         info["diag"] = ctx.get("diag", {})
