@@ -469,7 +469,8 @@ def apply_constraints(ctx: dict, qs: list) -> list:
 
 # ---------- run-time self-calibration (hindcast on the case's own history) ----------
 LOGIT_HI = -LOGIT_LO
-GRID_DAMP = [0.6, 0.8, 1.0, 1.25, 1.5]  # multiplier on D_G (effective damping capped at 1.3)
+GRID_DAMP = [0.6, 0.8, 1.0, 1.3, 1.6]  # multiplier on D_G (effective damping capped at 1.3); shrunk 50% -> <= 1.3
+GRID_FMULT = [0.75, 1.0, 1.25, 1.5, 2.0]  # multiplier on F_G (M2 flow); shrunk 50% -> <= 1.5 (v1 review ?-1)
 GRID_SMULT = [0.7, 0.85, 1.0, 1.2, 1.45]
 GRID_SKEW = [0.8, 1.0, 1.25]
 MAX_ORIGINS = 12
@@ -559,19 +560,24 @@ def calibrate(case: dict, ctx: dict, states: list, reads: list, h_now: float, h_
                     cnt += 1
         return tot / max(cnt, 1)
 
-    best, prior_loss = None, None
+    # coordinate search: medians (damp x fmult) at smult = skew = 1, then spreads (smult x skew) on the best medians
+    best, prior_loss, best_mms = None, None, None
     for d in GRID_DAMP:
-        mms = [medians(case, ctx, cut, h0, h1, dict(PRIORS, damp=d)) for h0, h1, cut, _, _ in jobs]
-        for sm in GRID_SMULT:
-            for sk in GRID_SKEW:
-                p = dict(PRIORS, damp=d, smult=sm, skew=sk)
-                lo = loss_of(p, mms)
-                if d == 1.0 and sm == 1.0 and sk == 1.0:
-                    prior_loss = lo
-                if best is None or lo < best[0] - 1e-12:
-                    best = (lo, d, sm, sk)
-    params = dict(PRIORS, damp=round(0.5 * (best[1] + 1), 3), smult=round(0.5 * (best[2] + 1), 3),
-                  skew=round(0.5 * (best[3] + 1), 3))
+        for f in GRID_FMULT:
+            p = dict(PRIORS, damp=d, fmult=f)
+            mms = [medians(case, ctx, cut, h0, h1, p) for h0, h1, cut, _, _ in jobs]
+            lo = loss_of(p, mms)
+            if d == 1.0 and f == 1.0:
+                prior_loss = lo
+            if best is None or lo < best[0] - 1e-12:
+                best, best_mms = (lo, d, f, 1.0, 1.0), mms
+    for sm in GRID_SMULT:
+        for sk in GRID_SKEW:
+            lo = loss_of(dict(PRIORS, damp=best[1], fmult=best[2], smult=sm, skew=sk), best_mms)
+            if lo < best[0] - 1e-12:
+                best = (lo, best[1], best[2], sm, sk)
+    params = dict(PRIORS, damp=round(0.5 * (best[1] + 1), 3), fmult=round(0.5 * (best[2] + 1), 3),
+                  smult=round(0.5 * (best[3] + 1), 3), skew=round(0.5 * (best[4] + 1), 3))
     gl = {}
     for h0, h1, cut, rcut, ys in jobs:
         qs, _ = predict(case, ctx, cut, h0, h1, params)
