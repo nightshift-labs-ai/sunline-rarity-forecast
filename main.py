@@ -351,6 +351,7 @@ def medians(case: dict, ctx: dict, states: list, h_now: float, h_tgt: float, par
     xs = [lnx(s["h"]) for s in win]
     dx = lnx(t_eff) - lnx(h_last)
     span = max(t_eff - h_last, 0.0)
+    dn_hist = last["N"] - ref["N"]  # players added since the reference state
     m3 = {}
     if len(post) >= 2 and dt >= 1 and span > 0:
         m3 = chain_closure(ctx, c_now, c_ref, last["N"], ref["N"], dt, h_last, t_eff, p_t)
@@ -375,7 +376,11 @@ def medians(case: dict, ctx: dict, states: list, h_now: float, h_tgt: float, par
         else:
             m1 = m_last
         v = max(0.0, gain / dt)
-        c_t = min(c_now[i] + v * span * F_G.get(key, 1.0) * params["fmult"], 0.9999 * p_t)
+        d_e = v * span * F_G.get(key, 1.0) * params["fmult"]
+        if dn_hist > 0:  # M2 feasibility: <= 0.8 x current non-earners + new players at the marginal earner ratio
+            rho = min(1.0, max(0.0, gain / dn_hist))
+            d_e = min(d_e, 0.8 * max(last["N"] - c_now[i], 0.0) + rho * max(p_t - last["N"], 0.0))
+        c_t = min(c_now[i] + d_e, 0.9999 * p_t)
         m2 = logit(100 * c_t / p_t)
         if i in m3:
             med[i] = 0.25 * m1 + 0.25 * m2 + 0.5 * logit(m3[i])
