@@ -128,3 +128,73 @@ the deadline. That is a generator assumption, not evidence.
 4. S_G per group from hindcast residual quantiles (quantile matching), keeping <= 8 tuned numbers.
 5. When real post-launch reads exist, run `tools/backtest.py --case <file>` on them and replace the synthetic table.
 6. Keep the run < 2 s worst case and byte-identical. Re-run `tools/check_out.py` and the double-run cmp after every change.
+
+## v3 (session s265, 2026-11-19)
+
+### Inputs this run
+- Operator practice diagnosis (/home/agent/makefun/briefs/fc_s264/practice_diag/): v2 scored 1.31 on p00/p01 with cov90 0.04. Every
+  read there has players_tracked 638, so build_states collapses them to one state and v2 takes the "persist" branch with a ~0.3-0.5
+  logit band. The page later refreshed to ~3,868 players (~6x), diluting every non-gate row.
+- Operator cohort world simulator (fc_s264/sim.py, 33 worlds = 11 types x 3 seeds, score.py). It is our own guess at the world, so it was
+  used as a check only. No constant was tuned to it: every constant below is the value given in the brief.
+
+### Changes (one commit each; CHECKS green after each)
+1. 914fdca M2 feasibility cap (medians): the projected new earners over the span are <= 0.8 x (players_now - earners_now)
+   + rho x (p_t - N_now), with rho = clamp(gain_since_ref / players_added_since_ref, 0, 1). It applies only when players were added (dn_hist > 0).
+   Sim 0.360 -> 0.317, and all 11 world types improved. Added tools/checks.sh (CHECKS a/b/c in one script).
+2. 98ebb89 calibration: smult = min(calibrated smult, 1.0). Sim 0.317 -> 0.294, cov90 0.99 -> 0.97. All 11 types improved or tied.
+   Coverage moved toward 0.90 but is still above it (0.97 pooled).
+3. 612bbf0 platinum / 100% rows: median >= logit(0.04%) at the target, before the chain PAV (apply_constraints still runs after).
+   Sim 0.294 -> 0.292, G4p 0.834 -> 0.706 (cov90 0.79 -> 0.91). MIXED by world type: W8_fastN_slowP 0.307 -> 0.326,
+   W10_lateWave 0.341 -> 0.350, W2_fastN 0.257 -> 0.261 got WORSE. W1/W4/W5/W6/W7 got better. G4h rose 0.500 -> 0.505 (the 100% rows).
+   It is kept because the mean drops and the floor is a domain fact, not a fit. Revisit it if real day-7 platinum rates come in below 0.04%.
+4. 15b9980 no-refresh path (no_refresh_q, refresh_prob): when every state has the same players_tracked N0, the forecast is a deterministic
+   mixture. Weight 1-p goes on the current rate. Weight p goes on a refresh to N1 = N0*g (ln g ~ N(ln 4, 0.8), truncated at g >= 1)
+   with E_i + f_i*(N1-N0) earners, where f_i = min(1, kappa*max(E_i - E_plat, 0)/N0) and ln kappa ~ N(ln 0.3, 1). E_plat is the platinum
+   count, or the lowest non-gate count if there is no platinum. p = P(first refresh in (A, A+D] | none in [0, A]), with the period
+   log-uniform on [0.5, 6] h and a uniform phase. A = the span of the reads, D = target - last read. p00 0.885, p01 0.935 (they match a hand
+   calculation). Grid: 41 g nodes x 9 kappa nodes + the no-refresh atom. Each quantile is the smallest atom whose cumulative weight
+   is >= tau. Gate rows stay at GATE_ROW. Calibration is skipped on this path (it never ran on launch night anyway).
+   Practice (operator truths, mean of p00/p01), v2 -> v3: a_pure6x 1.490 -> 0.405, a2_pure6x_gate16 1.679 -> 0.594, b_board 1.318 -> 0.317,
+   b+_strong_new 0.935 -> 0.199, c_mild3x 0.797 -> 0.165. cov90 went from 0.00-0.07 to 0.95-1.00.
+   Multi-N histories never take this path: world sim and synth s00/s01w are byte-identical to 612bbf0.
+
+### v3 checks (python 3.13, `-P -s`, tools/checks.sh)
+- (a) Kit p00/p01: two runs byte-identical, check_out OK, 0 fallbacks.
+- (b) s00 0.35 s, s01w (worst, 358 distinct reads) 0.46 s. 0 fallbacks, calibration_ran true, params damp 0.8, fmult 1.5, smult 1.0, skew 1.125.
+- Edge (in-process): a single read (p 0.826), a far target with one N (p 1.0), and no platinum row are all valid with 0 fallbacks.
+  refresh_prob gives 0 when A >= 6 h or D <= 0, and then the main model runs.
+- (c) World sim (mean pinball / cov90), house curve | v2 (e0b02a4) | v3 (15b9980):
+
+| world type      | curve      | v2         | v3         |
+|-----------------|------------|------------|------------|
+| W1_base         | 0.322/0.94 | 0.344/0.95 | 0.261/1.00 |
+| W2_fastN        | 0.383/0.95 | 0.325/0.96 | 0.261/0.99 |
+| W3_slowN        | 0.324/0.95 | 0.307/0.98 | 0.235/1.00 |
+| W4_fastP        | 0.338/0.96 | 0.321/0.96 | 0.224/1.00 |
+| W5_slowP        | 0.333/0.95 | 0.370/0.99 | 0.325/0.95 |
+| W6_stall        | 1.016/0.55 | 0.515/0.92 | 0.466/0.88 |
+| W7_satur        | 0.359/0.97 | 0.338/0.96 | 0.255/0.99 |
+| W8_fastN_slowP  | 0.416/0.93 | 0.343/0.98 | 0.326/0.97 |
+| W9_slowN_fastP  | 0.317/0.97 | 0.330/0.95 | 0.226/1.00 |
+| W10_lateWave    | 0.497/0.98 | 0.387/0.95 | 0.350/0.92 |
+| W11_backfill    | 0.438/0.96 | 0.379/0.95 | 0.286/0.97 |
+| MEAN            | 0.431/0.92 | 0.360/0.96 | 0.292/0.97 |
+
+  Step means: v2 0.360 -> m2cap 0.317 -> smult<=1 0.294 -> plat floor 0.292 -> no-refresh 0.292 (unchanged, as designed).
+  Per group v3: G0 0.022, G1c 0.222, G1f 0.331, G1m 0.245, G2 0.296, G3 0.173, G4h 0.505, G4m 0.308, G4p 0.706 (worst group still G4p).
+
+### Not done in v3
+- The planned multi-agent review of the v3 diff was not run (the launch was declined in this session). Only the edge tests above were run.
+- Pooled 90% coverage is still 0.97 (target 0.90). The bands are still too wide in most world types. smult was only capped, not lowered further.
+- The no-refresh path models ONE refresh. For a far target with one N (p -> 1), several refreshes would dilute more. It only matters if a
+  live case ever arrives with a single players_tracked value and a long horizon.
+- v2 next steps 2-5 (age-weighted origins, guard weights from loss ratios, quantile-matched S_G, real-read backtest) are not started.
+
+### Next steps (v4)
+1. Narrow the bands toward cov90 0.90 in a principled way, e.g. quantile-matched S_G from hindcast residuals (v2 list item 4). Check it in
+   every world type, not only on the mean.
+2. Look at W8_fastN_slowP / W10_lateWave, where the plat floor hurt. Test whether the floor should apply to the 100% rows (G4h) or to G4p only.
+3. W6_stall is still the worst type (0.466). Check whether project_p over-projects N after a stall.
+4. When real post-refresh reads exist: re-check the no-refresh priors (g ~ 4, kappa ~ 0.3, period 0.5-6 h) against the observed refresh.
+5. Keep < 2 s worst case, byte-identical double runs, and tools/checks.sh green after every change.
