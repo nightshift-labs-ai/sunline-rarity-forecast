@@ -1,4 +1,4 @@
-"""sunline-rarity-forecast: GTA VI PS5 trophy earn-rate forecaster (Nightshift Labs, build v1).
+"""sunline-rarity-forecast: GTA VI PS5 trophy earn-rate forecaster (Nightshift Labs, build v2).
 
 For each case in $MAKEFUN_INPUT_DIR (else /input), it writes <id>.out to $MAKEFUN_OUTPUT_DIR (else /output):
 {"trophies":[{"id":n,"q":[q05,q25,q50,q75,q95]}]}, the rates in percent at the case's target.
