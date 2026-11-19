@@ -673,8 +673,12 @@ def forecast_case(case: dict, name: str) -> tuple:
 
 def baseline_case(case: dict) -> dict:
     """The starter's forecast for a whole case (last-resort fallback)."""
-    last = case["history"][-1]["rates"]
-    days = case["horizon_minutes"] / 1440
+    hist = case.get("history") or []
+    last = (hist[-1].get("rates") or []) if hist else []
+    try:
+        days = float(case["horizon_minutes"]) / 1440
+    except Exception:
+        days = 6510 / 1440
     return {"trophies": [{"id": t["id"], "q": persistence_row(last[i] if i < len(last) else 0, days)}
                          for i, t in enumerate(case["trophies"])]}
 
@@ -690,7 +694,11 @@ def checked(forecast: dict, case: dict) -> bool:
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     for path in sorted(INPUT_DIR.glob("*.in")):
-        case = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            case = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # unreadable case: nothing valid can be written for it
+            print(json.dumps({"case": path.stem, "fallback_case": 1, "error": repr(exc)[:200]}), file=sys.stderr)
+            continue
         try:
             forecast, info = forecast_case(case, path.name)
             if not checked(forecast, case):
