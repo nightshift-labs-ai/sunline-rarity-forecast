@@ -444,6 +444,9 @@ def predict(case: dict, ctx: dict, states: list, h_now: float, h_tgt: float, par
             s_lo = max(s_lo, s * 1.2)
         if g in ("G4h", "G4p", "G4m") and inv_logit(med) < 0.2:  # grind rows near the floor: real upper tail
             s_hi = max(s_hi, 2.0)
+        if inv_logit(last) < 0.5 and g != "G4p" and i not in ctx["hundred"]:  # v4: not started yet -> lift upside
+            med, s_hi = med + 0.3, s_hi * 2.0
+            meth += "+lift"
         q = [med + z * (s_lo if z < 0 else s_hi) for z in Z]
         # floor mass: put q05 (and q25) exactly at 0.01 when the floor is likely
         p_floor = phi((LOGIT_LO - med) / s_lo)
