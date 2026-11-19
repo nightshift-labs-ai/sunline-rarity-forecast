@@ -741,10 +741,17 @@ def forecast_case(case: dict, name: str) -> tuple:
                 info["calibration_ran"] = True
                 info["guard"] = guard
             qs, methods = predict(case, ctx, states, h_now, h_tgt, params)
-        if any(v != "ours" for v in guard.values()):
-            n = len(trophies)
+        n = len(trophies)
+        hard = set() if nr is not None else {i for i in range(n) if qs[i] is not None
+                                             and ctx["groups"][i][0] == "G4h" and last[i] < 2.0}
+        if hard or any(v != "ours" for v in guard.values()):
             other = {"curve": house_curve_q(reads, n, h_now, h_tgt), "persist": persist_q(reads, n, h_now, h_tgt)}
             for i in range(n):
+                if i in hard:  # v4: hard grinds < 2% -> union of our band and the curve's band, never persist
+                    a, b = qs[i], other["curve"][i]
+                    qs[i] = [min(a[0], b[0])] + [0.5 * (x + y) for x, y in zip(a[1:4], b[1:4])] + [max(a[4], b[4])]
+                    methods[i] += "+union"
+                    continue
                 how = guard.get(ctx["groups"][i][0], "ours")
                 if qs[i] is not None and how != "ours":
                     qs[i] = [0.5 * (a + b) for a, b in zip(qs[i], other[how][i])]
