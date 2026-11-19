@@ -154,9 +154,11 @@ def main() -> None:
         full = json.loads(Path(args[args.index("--case") + 1]).read_text())
     else:
         full = synth(worst="--worst" in args)
-        if "--write" in args:
+        if "--write" in args:  # f00-like cut cases (deadline 59.5 h, target +108.5 h) for running main.py itself
             (ROOT / "synth").mkdir(exist_ok=True)
-            (ROOT / "synth" / ("s00w.json" if "--worst" in args else "s00.json")).write_text(json.dumps(full))
+            for worst, name in ((False, "s00"), (True, "s01w")):
+                case, _ = cut(synth(worst=worst), 59.5, 108.5)
+                (ROOT / "synth" / f"{name}.in").write_text(json.dumps(case))
     distinct = len({(r["players_tracked"], tuple(r["rates"])) for r in full["history"]})
     print(f"history: {len(full['history'])} reads, {distinct} distinct")
     run(full, [35.5, 47.5, 59.5], 108.5)

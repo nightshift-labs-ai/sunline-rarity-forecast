@@ -532,7 +532,7 @@ def calibrate(case: dict, ctx: dict, states: list, reads: list, h_now: float, h_
     if len(states) - start < 3 or h_now - states[start]["h"] < 24:
         return None
     ratio = (1 + h_tgt) / (1 + h_now)
-    h_lo, h_hi = states[start]["h"] + 3, (1 + states[-1]["h"]) / ratio - 1
+    h_lo, h_hi = max(states[start]["h"] + 3, 12.0), (1 + states[-1]["h"]) / ratio - 1  # notes: h0 in ~[12, 21]
     if h_hi <= h_lo:
         return None
     jobs = []
