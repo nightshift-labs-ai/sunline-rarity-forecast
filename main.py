@@ -394,7 +394,7 @@ def medians(case: dict, ctx: dict, states: list, h_now: float, h_tgt: float, par
             meth[i] = "m12"
         med[i] = max(med[i], logit(100 * 0.98 * c_now[i] / p_t))  # count floor
         if g == "G4p" or i in ctx["hundred"]:  # a week after launch someone has the platinum / 100%
-            med[i] = max(med[i], PLAT_FLOOR)
+            med[i] = max(med[i], logit(max(last["r"][i], 100 * (tester[i] + 5) / p_t)))  # v5: floor tied to N
         ct[i] = max(inv_logit(med[i]) * p_t / 100, 1.0)
     chain = [i for i in ctx["chain"] if i not in ctx["gate"]]
     for i, v in zip(chain, pav_dec([med[i] for i in chain])):
