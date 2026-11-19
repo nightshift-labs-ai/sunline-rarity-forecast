@@ -218,6 +218,7 @@ S_G = {"G1c_early": 0.35, "G1c": 0.8, "G1f": 0.8, "G1m": 0.6, "G2": 0.6, "G3": 0
        "G4p": 0.9, "G0": 0.45}
 PRIORS = {"damp": 1.0, "fmult": 1.0, "smult": 1.0, "skew": 1.0}
 H_REF = 108.5  # the final's horizon, where S_G applies
+PLAT_FLOOR = logit(0.04)  # median floor (logit) for platinum / 100%-completion rows at the target
 
 
 def ls_fit(xs: list, ys: list) -> tuple:
@@ -389,6 +390,8 @@ def medians(case: dict, ctx: dict, states: list, h_now: float, h_tgt: float, par
             med[i] = 0.4 * m1 + 0.6 * m2
             meth[i] = "m12"
         med[i] = max(med[i], logit(100 * 0.98 * c_now[i] / p_t))  # count floor
+        if g == "G4p" or i in ctx["hundred"]:  # a week after launch someone has the platinum / 100%
+            med[i] = max(med[i], PLAT_FLOOR)
         ct[i] = max(inv_logit(med[i]) * p_t / 100, 1.0)
     chain = [i for i in ctx["chain"] if i not in ctx["gate"]]
     for i, v in zip(chain, pav_dec([med[i] for i in chain])):
