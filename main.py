@@ -549,7 +549,7 @@ def calibrate(case: dict, ctx: dict, states: list, reads: list, h_now: float, h_
     h_end = states[-1]["h"]
     # origins: late cuts at fixed horizons >= 24 h scored at the last state (slow cumulative rises, days 2-3
     # dynamics), then the rest at the case's ln-time ratio (day-1 cuts); <= MAX_ORIGINS in total
-    plan = [(h_end - b, h_end) for b in FIXED_BACK if h_end - b >= h_lo]
+    plan = [(h_end - b, h_end) for b in FIXED_BACK if h_end - b >= h_lo and h_tgt - h_now >= 24]
     k = MAX_ORIGINS - len(plan)
     if h_hi > h_lo:
         plan += [(h0, ratio * (1 + h0) - 1) for h0 in (h_lo + (h_hi - h_lo) * j / max(k - 1, 1) for j in range(k))]
