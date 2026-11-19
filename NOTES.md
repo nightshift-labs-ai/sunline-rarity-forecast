@@ -36,6 +36,11 @@ The operator pushes and submits; the agent does neither.
   (0.5 s for both), fallbacks 0, calibration_ran true, 12 origins.
 - RULES worked example in tools/backtest.py: 0.403404 (matches).
 - Fuzz (40 mutated cases: random nulls, an all-null trophy, N halved, one read, launch-night only, short rate lists): 0 invalid, 0 fallbacks.
+- Edge cases through main() itself: an empty history writes a valid persistence file (fallback_case=1, visible on stderr), a
+  1-read history runs the priors path with 0 fallbacks, and an unreadable .in file is reported and skipped without stopping later cases.
+- Final run (commit eb5442e): kit 0.02 s, synthetic pair 0.52 s, all byte-identical on a second run, all outputs valid.
+  On the synthetic f00-like cut, calibration picked damp 0.8, smult 1.225, skew 1.125. The guard kept ours for G2/G3, blended
+  G1c/G1m/G4m with persistence, and blended G1f/G4h/G4p with the curve. The worst-case variant kept ours for G1c/G1f/G1m as well.
 
 ## Backtest table (SYNTHETIC: plumbing/timing only; the generator encodes our own assumptions, so do not tune on it)
 Checkpoints h = 35.5, 47.5, 59.5, horizon 108.5 h, mean pinball (logit):
