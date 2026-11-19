@@ -188,31 +188,240 @@ def context(case: dict, states: list) -> dict:
             gate.append(i)
     for i in gate:
         groups[i] = ("G0", None)
+    chain = chain_order(trophies, groups)
+    story = [i for i in chain if groups[i][0] in ("G1c", "G1f")]
     return {"groups": groups, "start": start, "gap": mean_gap(states, start), "gate": gate,
-            "chain": chain_order(trophies, groups),
+            "chain": chain, "story": story,
+            "final": [i for i in story if groups[i][0] == "G1f"],
+            "plat": [i for i in chain if groups[i][0] == "G4p"],
+            "missions": [i for i, (g, _) in enumerate(groups) if g == "G1m"],
+            "hundred": [i for i, t in enumerate(trophies) if "100%" in str(t.get("description", ""))
+                        and groups[i][0] == "G4h"],
             "tester_counts": [r * states[0]["N"] / 100 for r in states[0]["r"]]}
 
 
 # ---------- model ----------
+# M1 slope damping per group (prior), M2 flow factor f_g, prior logit spread at the 108 h horizon.
+D_G = {"G1c": 0.6, "G1f": 0.6, "G1m": 0.6, "G2": 0.7, "G3": 0.6, "G4m": 0.9, "G4h": 0.9, "G4p": 0.9, "G0": 0.6}
+F_G = {"G1c_early": 0.6, "G1c": 1.0, "G1f": 1.3, "G1m": 0.8, "G2": 0.8, "G3": 0.6, "G4m": 1.0, "G4h": 1.0,
+       "G4p": 1.0, "G0": 0.6}
+S_G = {"G1c_early": 0.35, "G1c": 0.8, "G1f": 0.8, "G1m": 0.6, "G2": 0.6, "G3": 0.45, "G4m": 0.9, "G4h": 0.9,
+       "G4p": 0.9, "G0": 0.45}
+PRIORS = {"damp": 1.0, "fmult": 1.0, "smult": 1.0, "skew": 1.0}
+H_REF = 108.5  # the final's horizon, where S_G applies
+
+
+def ls_fit(xs: list, ys: list) -> tuple:
+    """(slope, residual sd) of a least-squares line."""
+    n = len(xs)
+    mx, my = sum(xs) / n, sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    if sxx <= 1e-12:
+        return 0.0, 0.0
+    b = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
+    res = math.sqrt(sum((y - my - b * (x - mx)) ** 2 for x, y in zip(xs, ys)) / max(n - 2, 1))
+    return b, res
+
+
+def thin(states: list, cap: int = 60) -> list:
+    """At most ~cap states: every k-th plus the last (deterministic)."""
+    if len(states) <= cap:
+        return states
+    k = -(-len(states) // cap)
+    out = states[::k]
+    if out[-1] is not states[-1]:
+        out.append(states[-1])
+    return out
+
+
+def ref_state(post: list, h_last: float, back: float = 24.0) -> dict:
+    ref = post[0]
+    for s in post:
+        if s["h"] <= h_last - back:
+            ref = s
+    return ref
+
+
+def lnx(h: float) -> float:
+    return math.log(1 + max(h, -0.9))
+
+
+def project_p(post: list, h_last: float, t_eff: float) -> tuple:
+    """(P(T), sigma_lnP): damped ln N vs ln(1+h) trend, geometric mean with the damped 24 h velocity."""
+    n_last = post[-1]["N"]
+    if len(post) < 2 or t_eff <= h_last:
+        return n_last, 0.15
+    win = thin([s for s in post if s["h"] >= h_last - 36])
+    if len(win) < 2:
+        win = post[-2:]
+    b, _ = ls_fit([lnx(s["h"]) for s in win], [math.log(s["N"]) for s in win])
+    lp1 = math.log(n_last) + max(0.0, b) * 0.8 * (lnx(t_eff) - lnx(h_last))
+    ref = ref_state(post, h_last)
+    dt = h_last - ref["h"]
+    v = (n_last - ref["N"]) / dt if dt >= 1 else 0.0
+    lp2 = math.log(n_last + max(v, 0.0) * (t_eff - h_last) * 0.7)
+    lp = max(math.log(n_last), 0.5 * (lp1 + lp2))
+    return math.exp(lp), min(0.4, 0.1 + abs(lp1 - lp2) / 2)
+
+
+def pav_dec(vals: list) -> list:
+    """Isotonic regression, non-increasing (pool adjacent violators)."""
+    blocks = []
+    for v in vals:
+        blocks.append([v, 1])
+        while len(blocks) > 1 and blocks[-2][0] / blocks[-2][1] < blocks[-1][0] / blocks[-1][1]:
+            s, c = blocks.pop()
+            blocks[-1][0] += s
+            blocks[-1][1] += c
+    out = []
+    for s, c in blocks:
+        out += [s / c] * c
+    return out
+
+
+def chain_closure(ctx, c_now, c_ref, n_now, n_ref, dt, h_last, t_eff, p_t) -> dict:
+    """M3: integrate dC_k/dt = lambda_k (C_parent - C_k) hourly down the story chain; returns rates at t_eff."""
+    tester = ctx["tester_counts"]
+    story, missions = ctx["story"], ctx["missions"]
+    parent = {}
+    for pos, k in enumerate(story):
+        parent[k] = story[pos - 1] if pos else None
+    chapters = [k for k in story if ctx["groups"][k][0] == "G1c"]
+    for m in missions:  # the chapter whose count is just above the mission's
+        above = [k for k in chapters if c_now[k] >= c_now[m]]
+        parent[m] = min(above, key=lambda k: (c_now[k], k)) if above else None
+    rows = story + missions
+    lam, strong = {}, []
+    for k in rows:
+        p = parent[k]
+        par_now = n_now if p is None else c_now[p]
+        par_ref = n_ref if p is None else c_ref[p]
+        gap = 0.5 * ((par_now - c_now[k]) + (par_ref - c_ref[k]))
+        gain = c_now[k] - c_ref[k]
+        lam[k] = max(0.0, gain / (dt * max(gap, 1.0))) if dt >= 1 else 0.0
+        if gain > 3 * tester[k] and lam[k] > 0:
+            strong.append(lam[k])
+    if strong:
+        strong.sort()
+        floor = 0.5 * strong[len(strong) // 2]
+        for k in rows:
+            lam[k] = max(lam[k], floor)
+    for k in rows:
+        lam[k] = min(lam[k], 0.5)
+    span = t_eff - h_last
+    steps = max(1, int(math.ceil(span)))
+    step = span / steps
+    c = {k: c_now[k] for k in rows}
+    lp0, lp1 = math.log(n_now), math.log(p_t)
+    for j in range(1, steps + 1):
+        pt = math.exp(lp0 + (lp1 - lp0) * j / steps)
+        for k in rows:  # story rows first (in order), then missions with updated parents
+            p = parent[k]
+            par = pt if p is None else c[p]
+            if par > c[k]:
+                c[k] += lam[k] * (par - c[k]) * step
+    return {k: 100 * c[k] / p_t for k in rows}
+
+
+def medians(case: dict, ctx: dict, states: list, h_now: float, h_tgt: float, params: dict) -> dict:
+    """Median logits at the target and the facts the spreads need."""
+    n = len(case["trophies"])
+    start = fit_start(states)
+    post = states[start:]
+    last = states[-1]
+    h_last = last["h"]
+    gap = mean_gap(states, start)
+    t_eff = max(h_now, h_tgt - gap / 2) if len(post) >= 2 else h_tgt
+    p_t, sig_p = project_p(post, h_last, t_eff)
+    c_now = [r * last["N"] / 100 for r in last["r"]]
+    ref = ref_state(post, h_last)
+    dt = h_last - ref["h"]
+    c_ref = [r * ref["N"] / 100 for r in ref["r"]]
+    tester = ctx["tester_counts"]
+    win = thin([s for s in post if s["h"] >= h_last - 36])
+    xs = [lnx(s["h"]) for s in win]
+    dx = lnx(t_eff) - lnx(h_last)
+    span = max(t_eff - h_last, 0.0)
+    m3 = {}
+    if len(post) >= 2 and dt >= 1 and span > 0:
+        m3 = chain_closure(ctx, c_now, c_ref, last["N"], ref["N"], dt, h_last, t_eff, p_t)
+    med, grp, ct, meth = [0.0] * n, [""] * n, [1.0] * n, [""] * n
+    for i in range(n):
+        g, k = ctx["groups"][i]
+        gain = c_now[i] - c_ref[i]
+        if dt >= 12 and g == "G4h" and gain > 2 * tester[i] + 2:
+            g = "G4m"  # promoted: real growth
+        if dt >= 12 and g == "G3" and c_now[i] <= 1.2 * tester[i] + 1:
+            g = "G4h"  # demoted: still at the tester floor
+        key = "G1c_early" if g == "G1c" and (k or 1) <= 2 else g
+        grp[i] = key
+        m_last = logit(last["r"][i])
+        if len(post) < 2 or dt < 1 or span <= 0:
+            med[i], ct[i], meth[i] = m_last, max(c_now[i], 1.0), "persist"
+            continue
+        if len(win) >= 3:
+            b, _ = ls_fit(xs, [logit(s["r"][i]) for s in win])
+            d = min(1.3, D_G.get(g, 0.7) * params["damp"])
+            m1 = m_last + d * b * dx
+        else:
+            m1 = m_last
+        v = max(0.0, gain / dt)
+        c_t = min(c_now[i] + v * span * F_G.get(key, 1.0) * params["fmult"], 0.9999 * p_t)
+        m2 = logit(100 * c_t / p_t)
+        if i in m3:
+            med[i] = 0.25 * m1 + 0.25 * m2 + 0.5 * logit(m3[i])
+            meth[i] = "m123"
+        else:
+            med[i] = 0.4 * m1 + 0.6 * m2
+            meth[i] = "m12"
+        med[i] = max(med[i], logit(100 * 0.98 * c_now[i] / p_t))  # count floor
+        ct[i] = max(inv_logit(med[i]) * p_t / 100, 1.0)
+    chain = [i for i in ctx["chain"] if i not in ctx["gate"]]
+    for i, v in zip(chain, pav_dec([med[i] for i in chain])):
+        med[i] = v
+    return {"med": med, "grp": grp, "ct": ct, "meth": meth, "sig_p": sig_p, "p_t": p_t, "span": span,
+            "last": [logit(r) for r in last["r"]]}
+
+
 def predict(case: dict, ctx: dict, states: list, h_now: float, h_tgt: float, params: dict) -> tuple:
     """Logit quantiles (5 per trophy) at h_tgt from the states up to h_now, plus each row's method name."""
-    days = max(h_tgt - h_now, 0) / 24
-    spread = SIGMA_RW * math.sqrt(days)
-    last = states[-1]["r"]
+    mm = medians(case, ctx, states, h_now, h_tgt, params)
+    horizon = max(h_tgt - h_now, 0.0)
     out, methods = [], []
     for i in range(len(case["trophies"])):
         if i in ctx["gate"]:
             out.append(None)
             methods.append("gate")
             continue
-        m = logit(last[i])
-        out.append([m + z * spread for z in Z])
-        methods.append("persist")
+        s_model = S_G.get(mm["grp"][i], 0.7) * math.sqrt(horizon / H_REF)
+        s = math.sqrt(s_model ** 2 + mm["sig_p"] ** 2 + 1 / mm["ct"][i]) * params["smult"]
+        s = max(s, 0.15)
+        out.append([mm["med"][i] + z * s for z in Z])
+        methods.append(mm["meth"][i])
     return out, methods
 
 
 def apply_constraints(ctx: dict, qs: list) -> list:
-    """Cross-row constraints on logit quantiles (filled in by the full model)."""
+    """Per quantile level: PAV down the chain, missions >= final, 100% <= final, platinum <= every row."""
+    chain = [i for i in ctx["chain"] if qs[i] is not None]
+    for lv in range(5):
+        for i, v in zip(chain, pav_dec([qs[i][lv] for i in chain])):
+            qs[i][lv] = v
+        for f in ctx["final"]:
+            if qs[f] is None:
+                continue
+            for m in ctx["missions"]:
+                if qs[m] is not None:
+                    qs[m][lv] = max(qs[m][lv], qs[f][lv])
+            for h in ctx["hundred"]:
+                if qs[h] is not None:
+                    qs[h][lv] = min(qs[h][lv], qs[f][lv])
+        for p in ctx["plat"]:
+            if qs[p] is None:
+                continue
+            others = [qs[j][lv] for j in range(len(qs)) if j != p and qs[j] is not None]
+            if others:
+                qs[p][lv] = min(qs[p][lv], min(others))
     return qs
 
 
@@ -244,7 +453,7 @@ def forecast_case(case: dict, name: str) -> tuple:
         h_now = hours(case["at"])
         h_tgt = hours(case["target"])
         ctx = context(case, states)
-        params = {}
+        params = dict(PRIORS)
         qs, methods = predict(case, ctx, states, h_now, h_tgt, params)
         qs = apply_constraints(ctx, qs)
         info["params"] = params
