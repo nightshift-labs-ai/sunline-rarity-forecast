@@ -474,6 +474,7 @@ GRID_FMULT = [0.75, 1.0, 1.25, 1.5, 2.0]  # multiplier on F_G (M2 flow); shrunk 
 GRID_SMULT = [0.7, 0.85, 1.0, 1.2, 1.45]
 GRID_SKEW = [0.8, 1.0, 1.25]
 MAX_ORIGINS = 12
+FIXED_BACK = (24, 30, 36, 42, 48, 54)  # hours back from the last state for the fixed-horizon origins (<= 6)
 
 
 def pin(y: float, q: list) -> float:
@@ -534,16 +535,19 @@ def calibrate(case: dict, ctx: dict, states: list, reads: list, h_now: float, h_
         return None
     ratio = (1 + h_tgt) / (1 + h_now)
     h_lo, h_hi = max(states[start]["h"] + 3, 12.0), (1 + states[-1]["h"]) / ratio - 1  # notes: h0 in ~[12, 21]
-    if h_hi <= h_lo:
-        return None
+    h_end = states[-1]["h"]
+    # origins: late cuts at fixed horizons >= 24 h scored at the last state (slow cumulative rises, days 2-3
+    # dynamics), then the rest at the case's ln-time ratio (day-1 cuts); <= MAX_ORIGINS in total
+    plan = [(h_end - b, h_end) for b in FIXED_BACK if h_end - b >= h_lo]
+    k = MAX_ORIGINS - len(plan)
+    if h_hi > h_lo:
+        plan += [(h0, ratio * (1 + h0) - 1) for h0 in (h_lo + (h_hi - h_lo) * j / max(k - 1, 1) for j in range(k))]
     jobs = []
-    for j in range(MAX_ORIGINS):
-        h0 = h_lo + (h_hi - h_lo) * j / (MAX_ORIGINS - 1)
+    for h0, h1 in plan:
         cut = [s for s in states if s["h"] <= h0]
         rcut = [r for r in reads if r[0] < h0]
         if not rcut or len(cut) - fit_start(cut) < 2:
             continue
-        h1 = ratio * (1 + h0) - 1
         ans = [s for s in states if s["h"] <= h1][-1]
         jobs.append((h0, h1, cut, rcut, [logit(r) for r in ans["r"]]))
     if len(jobs) < 3:
@@ -596,7 +600,7 @@ def calibrate(case: dict, ctx: dict, states: list, reads: list, h_now: float, h_
         o, c, p_, k = gl[g]
         guard[g] = "ours" if o <= min(c, p_) else ("curve" if c <= p_ else "persist")
         gloss[g] = [round(o / k, 4), round(c / k, 4), round(p_ / k, 4)]
-    cinfo = {"origins": len(jobs), "ratio": round(ratio, 3), "loss_prior": round(prior_loss or -1, 4),
+    cinfo = {"origins": len(jobs), "fixed_origins": sum(1 for j in jobs if j[1] == h_end), "ratio": round(ratio, 3), "loss_prior": round(prior_loss or -1, 4),
              "loss_best": round(best[0], 4), "group_loss_ours_curve_persist": gloss}
     return params, guard, cinfo
 
